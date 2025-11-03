@@ -1,24 +1,32 @@
 """
 Step 1: Data Preparation and Initial Analysis
 
-This module replicates the Stata scripts GenerateFigure2Data.do and GenerateBootstrapData.do
-to perform baseline regression analysis, heterogeneity analysis, and bootstrap analysis.
+PURPOSE:
+This module estimates the historical relationship between temperature and economic growth using
+panel regression methods. It answers the question: "How does temperature affect GDP growth?"
+while controlling for country-specific development paths, global economic shocks, and precipitation.
 
-Original Stata files:
+The analysis produces:
+1. A baseline estimate of the temperature-growth relationship (non-linear, parabolic curve)
+2. Tests for heterogeneity (do rich and poor countries respond differently?)
+3. Bootstrap uncertainty estimates (1,000 alternative coefficient sets for projections)
+
+ECONOMIC QUESTION:
+Is there an "optimal temperature" for economic productivity? Do hotter or colder deviations from
+this optimum harm growth? How does this relationship vary across countries and over time?
+
+STATISTICAL APPROACH:
+- Panel regression with country and year fixed effects
+- Non-linear specification (quadratic in temperature)
+- Country-specific time trends to control for development paths
+- Clustered standard errors to account for within-country correlation
+- Bootstrap resampling for uncertainty quantification
+
+ORIGINAL STATA FILES:
 - GenerateFigure2Data.do: Main regression analysis and heterogeneity analysis
 - GenerateBootstrapData.do: Bootstrap analysis with various specifications
 
-Original Stata code structure:
-GenerateFigure2Data.do:
-- Baseline regression: reg growthWDI c.temp##c.temp UDel_precip_popweight UDel_precip_popweight_2 i.year _yi_* _y2_* i.iso_id, cluster(iso_id)
-- Heterogeneity analysis: reg `var' interact#c.(c.temp##c.temp UDel_precip_popweight UDel_precip_popweight_2) _yi_* _y2_* i.year i.iso_id, cl(iso_id)
-- Temporal heterogeneity: reg growthWDI interact#c.(c.temp##c.temp UDel_precip_popweight UDel_precip_popweight_2) _yi_* _y2_* i.year i.iso_id, cl(iso_id)
-
-GenerateBootstrapData.do:
-- Bootstrap pooled no lag: reg growthWDI UDel_temp_popweight UDel_temp_popweight_2 UDel_precip_popweight UDel_precip_popweight_2 i.year _yi_* _y2_* i.iso_id
-- Bootstrap rich/poor no lag: reg growthWDI poor#c.(UDel_temp_popweight UDel_temp_popweight_2 UDel_precip_popweight UDel_precip_popweight_2) i.year _yi_* _y2_* i.iso_id
-- Bootstrap pooled 5 lag: reg growthWDI L(0/5).(UDel_temp_popweight UDel_temp_popweight_2 UDel_precip_popweight UDel_precip_popweight_2) i.year _yi_* _y2_* i.iso_id
-- Bootstrap rich/poor 5 lag: reg growthWDI poor#c.(L(0/5).(UDel_temp_popweight UDel_temp_popweight_2 UDel_precip_popweight UDel_precip_popweight_2)) i.year _yi_* _y2_* i.iso_id
+See PROCESSING_FLOW.md for detailed documentation of the processing steps and variable meanings.
 """
 
 import pandas as pd
@@ -53,52 +61,76 @@ class BurkeDataPreparation:
         return self.data
     
     def prepare_data(self):
-        """Prepare data for analysis."""
+        """
+        Prepare data for regression analysis by creating derived variables.
+
+        This function creates:
+        1. Time trend variables (for country-specific growth trajectories)
+        2. Non-linear terms (squared temperature and precipitation)
+        3. Interaction indicators (rich/poor, early/late periods)
+        4. Fixed effects (country and year dummy variables)
+        """
         logger.info("Preparing data...")
-        
-        # Create time variables (like Stata: gen time = year - 1960)
-        # Original Stata: gen time = year - 1960
+
+        # Create time variables centered at 1960
+        # WHY: Centering improves numerical stability and allows interpretation of intercepts
+        # time = 0 represents year 1960 (near start of dataset)
+        # time = 50 represents year 2010
         logger.info("Creating time variables with reference year 1960...")
-        self.data['time'] = self.data['year'] - 1960
-        self.data['time2'] = self.data['time'] ** 2
-        
-        # Create temperature squared term
+        self.data['time'] = self.data['year'] - 1960  # Linear time trend
+        self.data['time2'] = self.data['time'] ** 2   # Quadratic time trend (allows acceleration/deceleration)
+
+        # Create temperature squared term to capture non-linear (parabolic) relationship
+        # WHY: Economic theory suggests productivity peaks at moderate temperatures
+        # Too cold OR too hot reduces productivity → inverted U-shape
         self.data['UDel_temp_popweight_2'] = self.data['UDel_temp_popweight'] ** 2
-        
-        # Create poor indicator (like Stata: gen poorWDIppp = (GDPpctile_WDIppp<50))
+
+        # Create "poor country" indicator: 1 if GDP per capita is below median, 0 otherwise
+        # WHY: Test whether poorer countries are more vulnerable to temperature shocks
+        # Hypothesis: Poor countries have less adaptive capacity (less AC, irrigation, etc.)
         self.data['poorWDIppp'] = (self.data['GDPpctile_WDIppp'] < 50).astype(int)
-        # Set to missing where GDPpctile_WDIppp is missing
+        # Preserve missing values (don't impute poor/rich status if GDP data is missing)
         self.data.loc[self.data['GDPpctile_WDIppp'].isna(), 'poorWDIppp'] = np.nan
-        
-        # Create early period indicator
+
+        # Create "early period" indicator: 1 if before 1990, 0 if 1990 or later
+        # WHY: Test whether temperature-growth relationship has changed over time
+        # Possible reasons: technological change, structural economic shifts, adaptation
         self.data['early'] = (self.data['year'] < 1990).astype(int)
         
-        # Create country dummy variables (like Stata: i.iso_id)
-        # This creates dummy variables for all countries except one (to avoid multicollinearity)
+        # Create COUNTRY FIXED EFFECTS (dummy variables for each country)
+        # WHY: Controls for all time-invariant country characteristics
+        # Examples: geography, culture, institutions, natural resources, historical legacies
+        # Without these: we might confuse "hot countries are poor" with "heat causes poverty"
+        # With these: we only use within-country variation (year-to-year temperature fluctuations)
         logger.info("Creating country dummy variables...")
-        
-        # Get unique country codes
+
         country_codes = sorted(self.data['iso_id'].unique())
         logger.info(f"Found {len(country_codes)} unique countries")
-        
-        # Create dummy variables with 'iso_' prefix
+
+        # Create dummy variables (1 if observation is from that country, 0 otherwise)
         country_dummies = pd.get_dummies(self.data['iso_id'], prefix='iso', dtype=int)
-        
-        # Drop the first country as reference category (to match Stata behavior)
+
+        # Drop one country as reference to avoid perfect collinearity
+        # (All dummies summing to 1 would make the design matrix singular)
         first_country = country_codes[0]
         reference_col = f'iso_{first_country}'
         country_dummies = country_dummies.drop(columns=[reference_col])
-        
+
         logger.info(f"Dropped '{reference_col}' as reference category")
         logger.info(f"Created {len(country_dummies.columns)} country dummy variables")
-        
-        # Add country dummies to the main dataframe
+
         self.data = pd.concat([self.data, country_dummies], axis=1)
 
-        # Original Stata: i.year (year fixed effects)
+        # Create YEAR FIXED EFFECTS (dummy variables for each year)
+        # WHY: Controls for global shocks that affect all countries in the same year
+        # Examples: oil price spikes (1973, 1979), global financial crisis (2008), tech booms
+        # Without these: we might confuse global recessions with temperature effects
+        # With these: we compare countries to each other within the same year
         logger.info("Creating year dummy variables...")
         year_codes = sorted(self.data['year'].unique())
         year_dummies = pd.get_dummies(self.data['year'], prefix='year', dtype=int)
+
+        # Drop one year as reference (same collinearity reason as country FE)
         reference_year = year_codes[0]
         reference_col = f'year_{reference_year}'
         if reference_col in year_dummies.columns:
@@ -114,30 +146,49 @@ class BurkeDataPreparation:
     
     def create_time_trends(self):
         """
-        Create time trends for regression analysis (optimized to avoid DataFrame fragmentation).
-        
+        Create COUNTRY-SPECIFIC TIME TRENDS for regression analysis.
+
+        WHY WE NEED THESE:
+        Country fixed effects control for the average level of each country, but countries
+        also have different growth TRAJECTORIES over time:
+        - China: rapid acceleration (exponential growth path)
+        - Japan: slowing growth (initially fast, then stagnant)
+        - USA: steady growth (relatively linear)
+
+        Without country-specific trends, we might misattribute these different development
+        paths to temperature effects. For example:
+        - If China is warming AND growing fast, is warming causing growth?
+        - No! China is industrializing. We need to separate this trend from temperature effects.
+
+        WHAT THIS CREATES:
+        - _yi_[country]: Linear time trend specific to each country (e.g., steady growth)
+        - _y2_[country]: Quadratic time trend specific to each country (e.g., acceleration)
+
+        Each country gets its own slope and curvature in its growth path.
+
         Original Stata code:
-        gen time = year - 1960
-        gen time2 = time^2
         qui xi i.iso_id*time, pref(_yi_)  //linear country time trends
         qui xi i.iso_id*time2, pref(_y2_) //quadratic country time trend
-        qui drop _yi_iso_id* 
-        qui drop _y2_iso_id* 
         """
         logger.info("Creating time trends...")
-        
-        # Create time variables with 1960 reference (like Stata: gen time = year - 1960; gen time2 = time^2)
+
+        # Create time variables centered at 1960
         self.data['time'] = self.data['year'] - 1960
         self.data['time2'] = self.data['time'] ** 2
         
-        # Create time trends (optimized to avoid DataFrame fragmentation)
+        # Create interaction terms: country_dummy × time and country_dummy × time²
+        # For each country, these equal the time/time² values for that country, 0 for others
+        # This allows each country to have its own linear and quadratic growth trajectory
+        # Example: _yi_CHN will be (year-1960) for China observations, 0 for all other countries
         countries = self.data['iso_id'].unique()
         yi_cols = {}
         y2_cols = {}
-        
+
         for country in countries:
             mask = self.data['iso_id'] == country
+            # Linear trend: equals time for this country, 0 for others
             yi_cols[f'_yi_{country}'] = np.where(mask, self.data['time'], 0)
+            # Quadratic trend: equals time² for this country, 0 for others
             y2_cols[f'_y2_{country}'] = np.where(mask, self.data['time2'], 0)
         
         # Add all columns at once to avoid fragmentation
@@ -477,30 +528,35 @@ class BurkeDataPreparation:
     
     def baseline_regression(self):
         """
-        Run baseline regression matching Stata specification exactly.
-        
+        Run baseline regression to estimate the global temperature-growth relationship.
+
+        REGRESSION MODEL:
+        GDP_growth = β₁·temperature + β₂·temperature² + β₃·precipitation + β₄·precipitation²
+                     + country_fixed_effects + year_fixed_effects
+                     + country_specific_time_trends + error
+
+        WHAT WE'RE ESTIMATING:
+        - β₁ (linear temperature effect): How growth changes with each 1°C increase
+        - β₂ (quadratic temperature effect): Whether this effect changes at different temperatures
+        - Combined: These create a parabolic relationship (∩-shaped curve)
+
+        INTERPRETATION:
+        - If β₁ > 0 and β₂ < 0: Growth increases with temperature up to an optimum, then decreases
+        - Optimal temperature = -β₁ / (2·β₂)
+        - This optimal temperature maximizes economic growth
+
+        CONTROLS:
+        - Precipitation (linear and squared): Controls for rainfall effects
+        - Country fixed effects: Controls for time-invariant country differences
+        - Year fixed effects: Controls for global shocks
+        - Country time trends: Controls for country-specific development paths
+
+        STANDARD ERRORS:
+        - Clustered by country: Accounts for within-country correlation over time
+        - This prevents underestimating uncertainty
+
         Original Stata code from GenerateFigure2Data.do:
-        use data/input/GrowthClimateDataset, clear
-        gen temp = UDel_temp_popweight
         reg growthWDI c.temp##c.temp UDel_precip_popweight UDel_precip_popweight_2 i.year _yi_* _y2_* i.iso_id, cluster(iso_id)
-            mat b = e(b)
-            mat b = b[1,1..2] //save coefficients
-            di _b[temp]/-2/_b[c.temp#c.temp]
-        loc min -5
-        margins, at(temp=(`min'(1)35)) post noestimcheck level(90)
-        parmest, norestore level(90)
-        split parm, p("." "#")
-        ren parm1 x
-        destring x, replace
-        replace x = x + `min' - 1  
-        drop parm* 
-        outsheet using data/output/estimatedGlobalResponse.csv, comma replace  //writing out results for R
-        use data/input/GrowthClimateDataset, clear
-        keep UDel_temp_popweight Pop TotGDP growthWDI GDPpctile_WDIppp continent iso countryname year
-        outsheet using data/output/mainDataset.csv, comma replace
-        clear
-        svmat b
-        outsheet using data/output/estimatedCoefficients.csv, comma replace
         """
         logger.info("Running baseline regression...")
         
@@ -517,21 +573,32 @@ class BurkeDataPreparation:
     
     def generate_global_response(self, results):
         """
-        Generate global response function data using margins-like approach.
-        
+        Generate the global temperature-growth response curve ("damage function").
+
+        PURPOSE:
+        Create a curve showing how GDP growth varies with temperature across the full range
+        of observed temperatures (-5°C to 35°C annual average).
+
+        WHAT THIS FUNCTION DOES:
+        1. Calculate optimal temperature (where growth is maximized)
+        2. For each temperature from -5°C to 35°C:
+           - Predict growth rate using: β₁·T + β₂·T²
+           - Calculate 90% confidence interval around this prediction
+        3. Save the curve for plotting (this becomes Figure 2, Panel A)
+
+        OUTPUT INTERPRETATION:
+        - x: Annual average temperature (°C)
+        - estimate: Predicted effect on growth rate (percentage points)
+        - min90/max90: 90% confidence interval bounds
+
+        EXAMPLE INTERPRETATION:
+        If at 25°C the estimate is -0.02:
+        - A country at 25°C average temperature experiences 2 percentage points lower growth
+        - Compared to a country at the optimal temperature
+        - Due to temperature alone (holding all else constant)
+
         Original Stata code:
-        mat b = e(b)
-        mat b = b[1,1..2] //save coefficients
-        di _b[temp]/-2/_b[c.temp#c.temp]
-        loc min -5
-        margins, at(temp=(`min'(1)35)) post noestimcheck level(90)
-        parmest, norestore level(90)
-        split parm, p("." "#")
-        ren parm1 x
-        destring x, replace
-        replace x = x + `min' - 1  
-        drop parm* 
-        outsheet using data/output/estimatedGlobalResponse.csv, comma replace
+        margins, at(temp=(-5(1)35)) post noestimcheck level(90)
         """
         logger.info("Generating global response function...")
         
@@ -730,9 +797,39 @@ class BurkeDataPreparation:
         return temporal_data
     
     def bootstrap_analysis(self):
-        """Run bootstrap analysis matching Stata implementation."""
+        """
+        Run bootstrap analysis to quantify uncertainty in regression coefficients.
+
+        PURPOSE:
+        The baseline regression gives us ONE set of coefficients, but these are uncertain
+        (subject to sampling variability). For future climate projections, we need to
+        propagate this uncertainty forward. Bootstrap creates 1,000 alternative coefficient
+        sets by resampling the data.
+
+        HOW BOOTSTRAP WORKS:
+        1. Randomly sample countries WITH REPLACEMENT (some countries appear multiple times)
+        2. Re-run the regression on this resampled dataset
+        3. Store the coefficients from this run
+        4. Repeat 1,000 times
+        5. Result: 1,000 sets of plausible coefficients reflecting estimation uncertainty
+
+        WHY RESAMPLE COUNTRIES (NOT OBSERVATIONS)?
+        - We want to preserve the time-series structure within each country
+        - Resampling at the country level respects the panel structure of the data
+        - This is called "cluster bootstrap" (clusters = countries)
+
+        FOUR MODEL SPECIFICATIONS:
+        1. Pooled (no lags): All countries respond the same, immediate effects only
+        2. Rich/Poor (no lags): Rich and poor countries respond differently
+        3. Pooled (5 lags): All countries respond the same, effects persist for 5 years
+        4. Rich/Poor (5 lags): Heterogeneous responses with persistent effects
+
+        OUTPUT:
+        Bootstrap CSV files containing 1,000 coefficient sets for each specification.
+        These will be used in Step 4 to create uncertainty bounds on future projections.
+        """
         logger.info("Starting bootstrap analysis...")
-        
+
         np.random.seed(RANDOM_SEED)
         
         # Get unique countries
@@ -963,14 +1060,46 @@ class BurkeDataPreparation:
         }
     
     def _create_lagged_variables(self, data):
-        """Create lagged variables for 5-lag models (L0 through L5)."""
+        """
+        Create lagged temperature and precipitation variables for dynamic models.
+
+        PURPOSE:
+        Temperature shocks may have PERSISTENT effects on growth, not just immediate impacts.
+        For example:
+        - A hot year destroys crops → less agricultural income
+        - Less income → less savings and investment
+        - Less investment → lower growth in subsequent years
+
+        Lags capture this dynamic adjustment process.
+
+        WHAT THIS CREATES:
+        For each variable (temp, temp², precip, precip²):
+        - L1: Value from 1 year ago
+        - L2: Value from 2 years ago
+        - L3: Value from 3 years ago
+        - L4: Value from 4 years ago
+        - L5: Value from 5 years ago
+
+        INTERPRETATION IN REGRESSION:
+        growth_t = β₀·temp_t + β₁·temp_{t-1} + β₂·temp_{t-2} + ... + β₅·temp_{t-5}
+
+        - β₀: Immediate (contemporaneous) effect of current temperature
+        - β₁: Effect of last year's temperature on this year's growth
+        - Sum(β₀...β₅): Total long-run effect after all dynamics play out
+
+        WHY 5 LAGS?
+        - Economic shocks typically dissipate within 5 years
+        - Beyond 5 years, effects become indistinguishable from noise
+        - This follows standard practice in macroeconomic time series analysis
+
+        Equivalent to Stata: xtset iso_id year
+        """
         data_copy = data.copy()
-        
-        # Equivalent to Stata: xtset iso_id year
+
+        # Sort by country and year (required for lagging to work correctly)
         data_copy = data_copy.sort_values(['iso_id', 'year'])
-        # (Removed logger.info here)
-        
-        # Optional: Check for missing years within each country
+
+        # Check for missing years within each country (gaps would break lag calculations)
         for country, group in data_copy.groupby('iso_id'):
             years = group['year'].values
             missing_years = set(range(years.min(), years.max()+1)) - set(years)
