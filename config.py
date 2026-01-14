@@ -2,11 +2,16 @@
 Configuration file for Burke, Hsiang, and Miguel 2015 replication project.
 
 Usage:
-    python main.py [run_name]
+    python main.py [run_name] [temp_filter]
 
     run_name: Optional name for this run (default: "default")
               Output directory will be: output_{run_name}_{timestamp}
               Output files will include _{run_name} suffix
+
+    temp_filter: Optional filter for countries by mean temperature (default: "all")
+                 - "all": Include all countries
+                 - "cool": Include only countries with mean temp <= median
+                 - "warm": Include only countries with mean temp > median
 """
 
 import os
@@ -20,6 +25,7 @@ DATA_PATH = PROJECT_ROOT / "data"
 
 # Run configuration (can be overridden by initialize_paths)
 RUN_NAME = "default"
+TEMP_FILTER = "all"  # Options: "all", "cool", "warm"
 
 def get_run_timestamp():
     """Get or create a consistent timestamp for this run."""
@@ -55,7 +61,7 @@ def _make_output_filename(base_name, run_name, extension):
     """
     return f"{base_name}_{run_name}{extension}"
 
-def initialize_paths(run_name="default"):
+def initialize_paths(run_name="default", temp_filter="all"):
     """Initialize all paths and output files with the given run_name.
 
     This function should be called from main.py after parsing command line arguments.
@@ -63,10 +69,13 @@ def initialize_paths(run_name="default"):
 
     Args:
         run_name: Name for this run (default: "default")
+        temp_filter: Filter for countries by mean temperature (default: "all")
+                     Options: "all", "cool", "warm"
     """
-    global RUN_NAME, OUTPUT_BASE, OUTPUT_PATH, FIGURES_PATH, CURRENT_TIMESTAMP, OUTPUT_FILES
+    global RUN_NAME, TEMP_FILTER, OUTPUT_BASE, OUTPUT_PATH, FIGURES_PATH, CURRENT_TIMESTAMP, OUTPUT_FILES
 
     RUN_NAME = run_name
+    TEMP_FILTER = temp_filter
     timestamp = get_run_timestamp()
     CURRENT_TIMESTAMP = timestamp
 

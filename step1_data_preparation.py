@@ -37,7 +37,7 @@ from scipy import stats
 import logging
 from tqdm import tqdm
 import os
-from config import INPUT_FILES, OUTPUT_FILES, N_BOOTSTRAP
+from config import INPUT_FILES, OUTPUT_FILES, N_BOOTSTRAP, TEMP_FILTER
 
 # Set up logging
 from config import setup_logging
@@ -48,17 +48,67 @@ RANDOM_SEED = 8675309  # Same as Stata
 
 class BurkeDataPreparation:
     """Replicate Burke, Hsiang, and Miguel (2015) data preparation and analysis."""
-    
+
     def __init__(self):
         self.data = None
         self.results = {}
-    
+        self.country_temp_stats = None  # Store country temperature statistics
+
     def load_data(self):
-        """Load the main dataset."""
+        """Load the main dataset and apply temperature filter if specified."""
         logger.info("Loading data...")
         self.data = pd.read_csv(INPUT_FILES['main_dataset'], encoding='latin-1')
         logger.info(f"Data loaded: {self.data.shape}")
+
+        # Apply temperature filter if specified
+        if TEMP_FILTER != "all":
+            self._filter_countries_by_temperature()
+
         return self.data
+
+    def _filter_countries_by_temperature(self):
+        """
+        Filter countries based on their mean temperature relative to the median.
+
+        For each country, we calculate the mean of UDel_temp_popweight across all years.
+        Then we find the median of these country means.
+
+        TEMP_FILTER options:
+        - "cool": Keep countries with mean temp <= median
+        - "warm": Keep countries with mean temp > median
+        """
+        logger.info(f"Filtering countries by temperature: {TEMP_FILTER}")
+
+        # Calculate mean temperature for each country
+        country_mean_temps = self.data.groupby('iso_id')['UDel_temp_popweight'].mean()
+
+        # Calculate median of country mean temperatures
+        median_temp = country_mean_temps.median()
+        logger.info(f"Median country mean temperature: {median_temp:.2f}°C")
+
+        # Determine which countries to keep
+        if TEMP_FILTER == "cool":
+            countries_to_keep = country_mean_temps[country_mean_temps <= median_temp].index
+            logger.info(f"Keeping {len(countries_to_keep)} countries with mean temp <= {median_temp:.2f}°C")
+        elif TEMP_FILTER == "warm":
+            countries_to_keep = country_mean_temps[country_mean_temps > median_temp].index
+            logger.info(f"Keeping {len(countries_to_keep)} countries with mean temp > {median_temp:.2f}°C")
+        else:
+            return  # No filtering for "all"
+
+        # Store statistics for reference
+        self.country_temp_stats = {
+            'median_temp': median_temp,
+            'n_cool_countries': len(country_mean_temps[country_mean_temps <= median_temp]),
+            'n_warm_countries': len(country_mean_temps[country_mean_temps > median_temp]),
+            'countries_kept': list(countries_to_keep)
+        }
+
+        # Filter the data
+        original_rows = len(self.data)
+        self.data = self.data[self.data['iso_id'].isin(countries_to_keep)]
+        logger.info(f"Filtered data: {original_rows} -> {len(self.data)} rows")
+        logger.info(f"Countries in filtered data: {self.data['iso_id'].nunique()}")
     
     def prepare_data(self):
         """

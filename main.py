@@ -5,16 +5,22 @@ This script orchestrates all the major processing steps and can skip steps
 if output files already exist and skip flags are set.
 
 Usage:
-    python main.py [run_name]
+    python main.py [run_name] [temp_filter]
 
     run_name: Optional name for this run (default: "default")
               Output directory will be: output_{run_name}_{timestamp}
               Output files will include _{run_name} suffix
 
+    temp_filter: Optional filter for countries by mean temperature (default: "all")
+                 - "all": Include all countries
+                 - "cool": Include only countries with mean temp <= median
+                 - "warm": Include only countries with mean temp > median
+
 Examples:
-    python main.py              # Uses run_name="default"
-    python main.py test         # Uses run_name="test"
-    python main.py experiment1  # Uses run_name="experiment1"
+    python main.py                      # All countries, run_name="default"
+    python main.py test                 # All countries, run_name="test"
+    python main.py cool_countries cool  # Cool countries only
+    python main.py warm_countries warm  # Warm countries only
 """
 
 import sys
@@ -24,24 +30,33 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent))
 
 # Parse command line arguments BEFORE importing config
-def get_run_name():
-    """Get run_name from command line arguments."""
+def get_run_args():
+    """Get run_name and temp_filter from command line arguments."""
+    run_name = "default"
+    temp_filter = "all"
+
     if len(sys.argv) > 1:
-        return sys.argv[1]
-    return "default"
+        run_name = sys.argv[1]
+    if len(sys.argv) > 2:
+        temp_filter = sys.argv[2].lower()
+        if temp_filter not in ["all", "cool", "warm"]:
+            print(f"Warning: Invalid temp_filter '{temp_filter}'. Using 'all'.")
+            temp_filter = "all"
 
-# Get run_name and initialize paths before other imports
-run_name = get_run_name()
+    return run_name, temp_filter
 
-# Now import config and initialize paths with the run_name
+# Get run_name and temp_filter, initialize paths before other imports
+run_name, temp_filter = get_run_args()
+
+# Now import config and initialize paths with the run_name and temp_filter
 import config
-config.initialize_paths(run_name)
+config.initialize_paths(run_name, temp_filter)
 
 # Import the rest after config is initialized
 from config import (
     PROJECT_ROOT, OUTPUT_PATH, FIGURES_PATH, OUTPUT_FILES,
     SKIP_STEP_1, SKIP_STEP_2, SKIP_STEP_3, SKIP_STEP_4, SKIP_STEP_5, SKIP_STEP_6,
-    RUN_NAME, get_figure_filename
+    RUN_NAME, TEMP_FILTER, get_figure_filename
 )
 from step1_data_preparation import run_step1
 from step2_climate_projections import run_step2
@@ -77,6 +92,7 @@ def main():
     logger.info("Starting Burke, Hsiang, and Miguel 2015 replication")
     logger.info(f"Project root: {PROJECT_ROOT}")
     logger.info(f"Run name: {RUN_NAME}")
+    logger.info(f"Temperature filter: {TEMP_FILTER}")
     logger.info(f"Output directory: {OUTPUT_PATH}")
 
 
