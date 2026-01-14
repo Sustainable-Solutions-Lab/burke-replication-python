@@ -79,10 +79,9 @@ venv.bak/
 .dmypy.json
 dmypy.json
 
-# Data files (large files that shouldn't be in version control)
-data/
-output/
-figures/
+# Data files
+# Include data/input/ (tracked), exclude data/output/ (generated outputs)
+data/output/
 
 # Log files
 *.log

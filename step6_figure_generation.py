@@ -296,8 +296,9 @@ class FigureGeneration:
         
         plt.tight_layout()
         
-        # Save figure
-        fig_path = FIGURES_PATH / "Figure2.pdf"
+        # Save figure with run_name suffix
+        from config import get_figure_filename
+        fig_path = get_figure_filename("Figure2")
         fig.savefig(fig_path, dpi=300, bbox_inches='tight')
         logger.info(f"Figure 2 saved to {fig_path}")
         
@@ -493,8 +494,9 @@ class FigureGeneration:
                            ha='center', va='center', transform=ax.transAxes)
                     ax.set_title(f'{model.title()} Model - {scenario.upper()}')
         plt.tight_layout()
-        # Save figure
-        fig_path = FIGURES_PATH / "Figure3.pdf"
+        # Save figure with run_name suffix
+        from config import get_figure_filename
+        fig_path = get_figure_filename("Figure3")
         fig.savefig(fig_path, dpi=300, bbox_inches='tight')
         logger.info(f"Figure 3 saved to {fig_path}")
         plt.close()
@@ -574,12 +576,13 @@ class FigureGeneration:
                     ax.set_title(f'{model.title()} Model - {scenario.upper()}')
         
         plt.tight_layout()
-        
-        # Save figure
-        fig_path = FIGURES_PATH / "Figure4.pdf"
+
+        # Save figure with run_name suffix
+        from config import get_figure_filename
+        fig_path = get_figure_filename("Figure4")
         fig.savefig(fig_path, dpi=300, bbox_inches='tight')
         logger.info(f"Figure 4 saved to {fig_path}")
-        
+
         plt.close()
     
     def create_figure5(self):
@@ -628,12 +631,13 @@ class FigureGeneration:
         axes[1, 1].set_visible(False)
         
         plt.tight_layout()
-        
-        # Save figure
-        fig_path = FIGURES_PATH / "Figure5.pdf"
+
+        # Save figure with run_name suffix
+        from config import get_figure_filename
+        fig_path = get_figure_filename("Figure5")
         fig.savefig(fig_path, dpi=300, bbox_inches='tight')
         logger.info(f"Figure 5 saved to {fig_path}")
-        
+
         plt.close()
     
     def create_summary_tables(self):
