@@ -29,12 +29,13 @@ def get_run_timestamp():
 
 # Get consistent timestamp for this run
 timestamp = get_run_timestamp()
-OUTPUT_PATH = PROJECT_ROOT / "data" / f"output_{timestamp}"
-FIGURES_PATH = PROJECT_ROOT / "data" / f"figures_{timestamp}"
+OUTPUT_BASE = PROJECT_ROOT / "data" / "output"
+OUTPUT_PATH = OUTPUT_BASE / f"output_{timestamp}"
+FIGURES_PATH = OUTPUT_PATH  # Place figures in the same output directory
 
 # Create directories if they don't exist
-for path in [DATA_PATH, OUTPUT_PATH, FIGURES_PATH]:
-    path.mkdir(exist_ok=True)
+for path in [DATA_PATH, OUTPUT_BASE, OUTPUT_PATH]:
+    path.mkdir(exist_ok=True, parents=True)
 
 # Store timestamp for logging
 CURRENT_TIMESTAMP = timestamp

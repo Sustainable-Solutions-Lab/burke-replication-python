@@ -582,58 +582,129 @@ class BurkeDataPreparation:
         WHAT THIS FUNCTION DOES:
         1. Calculate optimal temperature (where growth is maximized)
         2. For each temperature from -5°C to 35°C:
-           - Predict growth rate using: β₁·T + β₂·T²
-           - Calculate 90% confidence interval around this prediction
-        3. Save the curve for plotting (this becomes Figure 2, Panel A)
+           - Predict growth rate using full model with other covariates at sample means
+           - Calculate 90% confidence interval using FULL variance-covariance matrix
+        3. Normalize by subtracting maximum (like R code does)
+        4. Save the curve for plotting (this becomes Figure 2, Panel A)
 
-        OUTPUT INTERPRETATION:
-        - x: Annual average temperature (°C)
-        - estimate: Predicted effect on growth rate (percentage points)
-        - min90/max90: 90% confidence interval bounds
+        MATCHING STATA'S MARGINS COMMAND:
+        Stata's `margins, at(temp=(-5(1)35))` computes predictions by:
+        1. Setting temp to specified values
+        2. Setting ALL OTHER covariates to their sample means
+        3. Using the FULL VCE matrix for standard error calculation
 
-        EXAMPLE INTERPRETATION:
-        If at 25°C the estimate is -0.02:
-        - A country at 25°C average temperature experiences 2 percentage points lower growth
-        - Compared to a country at the optimal temperature
-        - Due to temperature alone (holding all else constant)
+        This implementation replicates that approach by:
+        - Constructing full gradient vectors with sample means for non-temperature variables
+        - Using the complete variance-covariance matrix from the regression
 
         Original Stata code:
         margins, at(temp=(-5(1)35)) post noestimcheck level(90)
+        parmest, norestore level(90)
         """
         logger.info("Generating global response function...")
-        
+
         # Get coefficients
         temp_coef = results.params['UDel_temp_popweight']
         temp2_coef = results.params['UDel_temp_popweight_2']
-        
-        # Calculate optimal temperature
+
+        # Calculate optimal temperature (where growth is maximized)
         optimal_temp = -temp_coef / (2 * temp2_coef)
-        
+
         # Generate temperature range for response function (like Stata: margins, at(temp=(-5(1)35)))
         temp_range = np.arange(-5, 36, 1)
-        
-        # Calculate predicted growth rates
-        predictions = temp_coef * temp_range + temp2_coef * temp_range ** 2
-        
-        # Get confidence intervals
-        temp_vars = ['UDel_temp_popweight', 'UDel_temp_popweight_2']
-        temp_coefs = results.params[temp_vars]
-        temp_cov = results.cov_params().loc[temp_vars, temp_vars]
-        
-        # Calculate standard errors for predictions
+
+        # Get all parameter names from the regression results
+        param_names = list(results.params.index)
+        n_params = len(param_names)
+
+        # Compute sample means for constructing the gradient vector
+        # For each covariate, we need its mean value in the regression sample
+        # Note: For FE dummies, the mean is the proportion of observations with that FE=1
+        sample_means = {}
+        for name in param_names:
+            if name == 'const':
+                sample_means[name] = 1.0  # Constant always = 1
+            elif name == 'UDel_temp_popweight':
+                sample_means[name] = None  # Will be set by at() values
+            elif name == 'UDel_temp_popweight_2':
+                sample_means[name] = None  # Will be set by at() values
+            elif name in self.data.columns:
+                # For variables in the data, use sample mean
+                sample_means[name] = self.data[name].mean()
+            else:
+                # For derived variables (time trends, etc.), compute from data
+                if name.startswith('_yi_'):
+                    country = name[4:]
+                    if country in self.data['iso_id'].values:
+                        mask = self.data['iso_id'] == country
+                        sample_means[name] = (self.data.loc[mask, 'year'] - 1960).mean() * mask.mean()
+                    else:
+                        sample_means[name] = 0.0
+                elif name.startswith('_y2_'):
+                    country = name[4:]
+                    if country in self.data['iso_id'].values:
+                        mask = self.data['iso_id'] == country
+                        sample_means[name] = ((self.data.loc[mask, 'year'] - 1960)**2).mean() * mask.mean()
+                    else:
+                        sample_means[name] = 0.0
+                elif name.startswith('iso_'):
+                    # Country FE dummy - mean is proportion of obs from that country
+                    country = name[4:]
+                    sample_means[name] = (self.data['iso_id'] == int(country)).mean() if country.isdigit() else 0.0
+                elif name.startswith('year_'):
+                    # Year FE dummy - mean is proportion of obs from that year
+                    year = name[5:]
+                    sample_means[name] = (self.data['year'] == int(year)).mean() if year.isdigit() else 0.0
+                else:
+                    sample_means[name] = 0.0
+
+        # Get full variance-covariance matrix
+        full_cov = results.cov_params().values
+
+        # Step 1: Calculate predicted growth rates and standard errors
+        predictions_raw = []
         se_predictions = []
+
         for temp in temp_range:
-            grad = np.array([temp, temp**2])
-            var = grad.T @ temp_cov @ grad
-            se_predictions.append(np.sqrt(var))
-        
+            # Construct full gradient vector (like Stata's margins)
+            # For each parameter: gradient = value of corresponding covariate at this temp
+            grad = np.zeros(n_params)
+            for i, name in enumerate(param_names):
+                if name == 'const':
+                    grad[i] = 1.0
+                elif name == 'UDel_temp_popweight':
+                    grad[i] = temp
+                elif name == 'UDel_temp_popweight_2':
+                    grad[i] = temp**2
+                else:
+                    # Use sample mean for all other covariates
+                    grad[i] = sample_means.get(name, 0.0)
+
+            # Compute prediction: y = gradient' * beta
+            pred = grad @ results.params.values
+            predictions_raw.append(pred)
+
+            # Compute variance: Var(y) = gradient' * VCE * gradient
+            pred_var = grad.T @ full_cov @ grad
+            se_predictions.append(np.sqrt(max(0, pred_var)))
+
+        predictions_raw = np.array(predictions_raw)
         se_predictions = np.array(se_predictions)
-        
-        # Calculate confidence intervals (90% CI like Stata)
+
+        # Step 2: Calculate confidence intervals for raw predictions (90% CI like Stata)
+        # Note: Stata uses t-distribution, but with large df it's very close to normal
         ci_factor = stats.norm.ppf(0.95)  # 90% CI
-        lower_ci = predictions - ci_factor * se_predictions
-        upper_ci = predictions + ci_factor * se_predictions
-        
+        lower_ci_raw = predictions_raw - ci_factor * se_predictions
+        upper_ci_raw = predictions_raw + ci_factor * se_predictions
+
+        # Step 3: Normalize by subtracting the maximum estimate (matching R code exactly)
+        # R code: mx = max(resp$estimate); est = resp$estimate - mx
+        #         min90 = resp$min90 - mx; max90 = resp$max90 - mx
+        mx = np.max(predictions_raw)
+        predictions = predictions_raw - mx
+        lower_ci = lower_ci_raw - mx
+        upper_ci = upper_ci_raw - mx
+
         # Create response function dataframe
         response_data = pd.DataFrame({
             'x': temp_range,
@@ -641,158 +712,308 @@ class BurkeDataPreparation:
             'min90': lower_ci,
             'max90': upper_ci
         })
-        
+
         # Save results
         response_data.to_csv(OUTPUT_FILES['estimated_global_response'], index=False)
-        
+
         # Save coefficients (like Stata: mat b = e(b); mat b = b[1,1..2])
         coef_data = pd.DataFrame({
             'temp': [temp_coef],
             'temp2': [temp2_coef]
         })
         coef_data.to_csv(OUTPUT_FILES['estimated_coefficients'], index=False)
-        
+
         logger.info(f"Global response function saved. Optimal temperature: {optimal_temp:.2f}°C")
         return response_data
     
     def heterogeneity_analysis(self):
         """
         Analyze heterogeneity in temperature responses (Figure 2, panels B, D, E).
-        
+
+        MATCHING STATA'S MARGINS COMMAND:
+        Stata's `margins, over(interact) at(temp=(0(1)30))` computes predictions by:
+        1. Setting temp to specified values for each interact group
+        2. Setting ALL OTHER covariates to their sample means
+        3. Using the FULL VCE matrix for standard error calculation
+
         Original Stata code:
-        loc vars growthWDI AgrGDPgrowthCap NonAgrGDPgrowthCap 
+        loc vars growthWDI AgrGDPgrowthCap NonAgrGDPgrowthCap
         foreach var of loc vars  {
-        use data/input/GrowthClimateDataset, clear
-        drop _yi_* _y2_* time time2
-        gen time = year - 1960
-        gen time2 = time^2
-        qui xi i.iso_id*time, pref(_yi_)  //linear country time trends
-        qui xi i.iso_id*time2, pref(_y2_) //quadratic country time trend
-        qui drop _yi_iso_id* 
-        qui drop _y2_iso_id* 
-        gen temp = UDel_temp_popweight 
-        gen poorWDIppp = (GDPpctile_WDIppp<50)
-        replace poorWDIppp=. if GDPpctile_WDIppp==.
-        gen interact = poorWDIppp
+        ...
         qui reg `var' interact#c.(c.temp##c.temp UDel_precip_popweight UDel_precip_popweight_2)  _yi_* _y2_* i.year i.iso_id, cl(iso_id)
+        margins, over(interact) at(temp=(0(1)30)) post noestimcheck force level(90)
         """
         logger.info("Running heterogeneity analysis...")
-        
+
         results_list = []
-        
+
         # Variables to analyze (like Stata: loc vars growthWDI AgrGDPgrowthCap NonAgrGDPgrowthCap)
         variables = ['growthWDI', 'AgrGDPgrowthCap', 'NonAgrGDPgrowthCap']
-        
+
         for var in variables:
             if var not in self.data.columns:
                 logger.warning(f"Variable {var} not found in dataset, skipping...")
                 continue
-                
+
             logger.info(f"Analyzing heterogeneity for {var}...")
-            
+
             # Use unified regression function for heterogeneity analysis
-            result_dict = self.run_regression('heterogeneity', 
-                                           dependent_var=var, 
+            result_dict = self.run_regression('heterogeneity',
+                                           dependent_var=var,
                                            interaction_var='poorWDIppp')
-            
+
             results = result_dict['results']
-            
+
+            # Get all parameter names and full VCE matrix
+            param_names = list(results.params.index)
+            n_params = len(param_names)
+            full_cov = results.cov_params().values
+
+            # Compute sample means for all covariates (like Stata's margins)
+            sample_means = {}
+            for name in param_names:
+                if name == 'const':
+                    sample_means[name] = 1.0
+                elif name in ['UDel_temp_popweight', 'UDel_temp_popweight_2',
+                             'temp_poor', 'temp2_poor']:
+                    sample_means[name] = None  # Will be set by at() and over() values
+                elif name in self.data.columns:
+                    sample_means[name] = self.data[name].mean()
+                else:
+                    # Handle derived variables (time trends, FE dummies)
+                    if name.startswith('_yi_'):
+                        country = name[4:]
+                        if country in self.data['iso_id'].values:
+                            mask = self.data['iso_id'] == country
+                            sample_means[name] = (self.data.loc[mask, 'year'] - 1960).mean() * mask.mean()
+                        else:
+                            sample_means[name] = 0.0
+                    elif name.startswith('_y2_'):
+                        country = name[4:]
+                        if country in self.data['iso_id'].values:
+                            mask = self.data['iso_id'] == country
+                            sample_means[name] = ((self.data.loc[mask, 'year'] - 1960)**2).mean() * mask.mean()
+                        else:
+                            sample_means[name] = 0.0
+                    elif name.startswith('iso_'):
+                        country = name[4:]
+                        sample_means[name] = (self.data['iso_id'] == int(country)).mean() if country.isdigit() else 0.0
+                    elif name.startswith('year_'):
+                        year = name[5:]
+                        sample_means[name] = (self.data['year'] == int(year)).mean() if year.isdigit() else 0.0
+                    else:
+                        sample_means[name] = 0.0
+
             # Generate response functions for rich and poor (like Stata: margins, over(interact) at(temp=(0(1)30)))
             temp_range = np.arange(0, 31, 1)
-            
+            ci_factor = stats.norm.ppf(0.95)  # 90% CI
+
             for interact in [0, 1]:  # 0 = rich, 1 = poor
-                if interact == 0:
-                    # Rich countries (no interaction)
-                    temp_coef = results.params['UDel_temp_popweight']
-                    temp2_coef = results.params['UDel_temp_popweight_2']
-                else:
-                    # Poor countries (with interaction)
-                    temp_coef = results.params['UDel_temp_popweight'] + results.params.get('temp_poor', 0)
-                    temp2_coef = results.params['UDel_temp_popweight_2'] + results.params.get('temp2_poor', 0)
-                
-                # Calculate predictions
-                predictions = temp_coef * temp_range + temp2_coef * temp_range ** 2
-                
-                # Center predictions (like Stata: predictions_centered = predictions - np.max(predictions))
-                predictions_centered = predictions - np.max(predictions)
-                
+                predictions_raw = []
+                se_predictions = []
+
+                for temp_val in temp_range:
+                    # Construct full gradient vector (like Stata's margins)
+                    grad = np.zeros(n_params)
+                    for i, name in enumerate(param_names):
+                        if name == 'const':
+                            grad[i] = 1.0
+                        elif name == 'UDel_temp_popweight':
+                            grad[i] = temp_val
+                        elif name == 'UDel_temp_popweight_2':
+                            grad[i] = temp_val**2
+                        elif name == 'temp_poor':
+                            grad[i] = temp_val if interact == 1 else 0.0
+                        elif name == 'temp2_poor':
+                            grad[i] = temp_val**2 if interact == 1 else 0.0
+                        elif name == 'precip_poor':
+                            # Mean precip for poor countries if interact==1
+                            if interact == 1:
+                                grad[i] = sample_means.get('UDel_precip_popweight', 0.0)
+                            else:
+                                grad[i] = 0.0
+                        elif name == 'precip2_poor':
+                            if interact == 1:
+                                grad[i] = sample_means.get('UDel_precip_popweight_2', 0.0)
+                            else:
+                                grad[i] = 0.0
+                        else:
+                            grad[i] = sample_means.get(name, 0.0)
+
+                    # Compute prediction: y = gradient' * beta
+                    pred = grad @ results.params.values
+                    predictions_raw.append(pred)
+
+                    # Compute variance: Var(y) = gradient' * VCE * gradient
+                    pred_var = grad.T @ full_cov @ grad
+                    se_predictions.append(np.sqrt(max(0, pred_var)))
+
+                predictions_raw = np.array(predictions_raw)
+                se_predictions = np.array(se_predictions)
+
+                # Calculate raw CIs
+                lower_ci_raw = predictions_raw - ci_factor * se_predictions
+                upper_ci_raw = predictions_raw + ci_factor * se_predictions
+
+                # Normalize by subtracting the maximum estimate (matching R code)
+                mx = np.max(predictions_raw)
+                predictions = predictions_raw - mx
+                lower_ci = lower_ci_raw - mx
+                upper_ci = upper_ci_raw - mx
+
                 # Create result rows
                 for i, temp_val in enumerate(temp_range):
                     results_list.append({
                         'x': temp_val,
-                        'estimate': predictions_centered[i],
-                        'min90': predictions_centered[i] - 0.02,  # Simplified CI
-                        'max90': predictions_centered[i] + 0.02,
+                        'estimate': predictions[i],
+                        'min90': lower_ci[i],
+                        'max90': upper_ci[i],
                         'interact': interact,
                         'model': var
                     })
-        
+
         # Save heterogeneity results
         heterogeneity_data = pd.DataFrame(results_list)
         heterogeneity_data.to_csv(OUTPUT_FILES['effect_heterogeneity'], index=False)
-        
+
         logger.info("Heterogeneity analysis completed")
         return heterogeneity_data
     
     def temporal_heterogeneity(self):
         """
         Analyze temporal heterogeneity (Figure 2, panel C).
-        
+
+        MATCHING STATA'S MARGINS COMMAND:
+        Stata's `margins, over(interact) at(temp=(0(1)30))` computes predictions by:
+        1. Setting temp to specified values for each interact group (early/late)
+        2. Setting ALL OTHER covariates to their sample means
+        3. Using the FULL VCE matrix for standard error calculation
+
         Original Stata code:
-        use data/input/GrowthClimateDataset, clear
-        drop _yi_* _y2_* time time2
-        gen time = year - 1960
-        gen time2 = time^2
-        qui xi i.iso_id*time, pref(_yi_)  //linear country time trends
-        qui xi i.iso_id*time2, pref(_y2_) //quadratic country time trend
-        qui drop _yi_iso_id* 
-        qui drop _y2_iso_id* 
-        gen temp = UDel_temp_popweight 
-        gen early = year<1990
-        gen interact = early
         qui reg growthWDI interact#c.(c.temp##c.temp UDel_precip_popweight UDel_precip_popweight_2)  _yi_* _y2_* i.year i.iso_id, cl(iso_id)
+        margins, over(interact) at(temp=(0(1)30)) post noestimcheck level(90)
         """
         logger.info("Running temporal heterogeneity analysis...")
-        
+
         # Use unified regression function for temporal heterogeneity analysis
-        result_dict = self.run_regression('temporal', 
-                                       dependent_var='growthWDI', 
+        result_dict = self.run_regression('temporal',
+                                       dependent_var='growthWDI',
                                        interaction_var='early')
-        
+
         results = result_dict['results']
-        
+
+        # Get all parameter names and full VCE matrix
+        param_names = list(results.params.index)
+        n_params = len(param_names)
+        full_cov = results.cov_params().values
+
+        # Compute sample means for all covariates (like Stata's margins)
+        sample_means = {}
+        for name in param_names:
+            if name == 'const':
+                sample_means[name] = 1.0
+            elif name in ['UDel_temp_popweight', 'UDel_temp_popweight_2',
+                         'temp_early', 'temp2_early']:
+                sample_means[name] = None  # Will be set by at() and over() values
+            elif name in self.data.columns:
+                sample_means[name] = self.data[name].mean()
+            else:
+                # Handle derived variables (time trends, FE dummies)
+                if name.startswith('_yi_'):
+                    country = name[4:]
+                    if country in self.data['iso_id'].values:
+                        mask = self.data['iso_id'] == country
+                        sample_means[name] = (self.data.loc[mask, 'year'] - 1960).mean() * mask.mean()
+                    else:
+                        sample_means[name] = 0.0
+                elif name.startswith('_y2_'):
+                    country = name[4:]
+                    if country in self.data['iso_id'].values:
+                        mask = self.data['iso_id'] == country
+                        sample_means[name] = ((self.data.loc[mask, 'year'] - 1960)**2).mean() * mask.mean()
+                    else:
+                        sample_means[name] = 0.0
+                elif name.startswith('iso_'):
+                    country = name[4:]
+                    sample_means[name] = (self.data['iso_id'] == int(country)).mean() if country.isdigit() else 0.0
+                elif name.startswith('year_'):
+                    year = name[5:]
+                    sample_means[name] = (self.data['year'] == int(year)).mean() if year.isdigit() else 0.0
+                else:
+                    sample_means[name] = 0.0
+
         # Generate response functions for early and late periods
         temp_range = np.arange(0, 31, 1)
+        ci_factor = stats.norm.ppf(0.95)  # 90% CI
         results_list = []
-        
+
         for interact in [0, 1]:  # 0 = late, 1 = early
-            if interact == 0:
-                # Late period (no interaction)
-                temp_coef = results.params['UDel_temp_popweight']
-                temp2_coef = results.params['UDel_temp_popweight_2']
-            else:
-                # Early period (with interaction)
-                temp_coef = results.params['UDel_temp_popweight'] + results.params.get('temp_early', 0)
-                temp2_coef = results.params['UDel_temp_popweight_2'] + results.params.get('temp2_early', 0)
-            
-            # Calculate predictions
-            predictions = temp_coef * temp_range + temp2_coef * temp_range ** 2
-            predictions_centered = predictions - np.max(predictions)
-            
+            predictions_raw = []
+            se_predictions = []
+
+            for temp_val in temp_range:
+                # Construct full gradient vector (like Stata's margins)
+                grad = np.zeros(n_params)
+                for i, name in enumerate(param_names):
+                    if name == 'const':
+                        grad[i] = 1.0
+                    elif name == 'UDel_temp_popweight':
+                        grad[i] = temp_val
+                    elif name == 'UDel_temp_popweight_2':
+                        grad[i] = temp_val**2
+                    elif name == 'temp_early':
+                        grad[i] = temp_val if interact == 1 else 0.0
+                    elif name == 'temp2_early':
+                        grad[i] = temp_val**2 if interact == 1 else 0.0
+                    elif name == 'precip_early':
+                        # Mean precip for early period if interact==1
+                        if interact == 1:
+                            grad[i] = sample_means.get('UDel_precip_popweight', 0.0)
+                        else:
+                            grad[i] = 0.0
+                    elif name == 'precip2_early':
+                        if interact == 1:
+                            grad[i] = sample_means.get('UDel_precip_popweight_2', 0.0)
+                        else:
+                            grad[i] = 0.0
+                    else:
+                        grad[i] = sample_means.get(name, 0.0)
+
+                # Compute prediction: y = gradient' * beta
+                pred = grad @ results.params.values
+                predictions_raw.append(pred)
+
+                # Compute variance: Var(y) = gradient' * VCE * gradient
+                pred_var = grad.T @ full_cov @ grad
+                se_predictions.append(np.sqrt(max(0, pred_var)))
+
+            predictions_raw = np.array(predictions_raw)
+            se_predictions = np.array(se_predictions)
+
+            # Calculate raw CIs
+            lower_ci_raw = predictions_raw - ci_factor * se_predictions
+            upper_ci_raw = predictions_raw + ci_factor * se_predictions
+
+            # Normalize by subtracting the maximum estimate (matching R code)
+            mx = np.max(predictions_raw)
+            predictions = predictions_raw - mx
+            lower_ci = lower_ci_raw - mx
+            upper_ci = upper_ci_raw - mx
+
             # Create result rows
             for i, temp_val in enumerate(temp_range):
                 results_list.append({
                     'x': temp_val,
-                    'estimate': predictions_centered[i],
-                    'min90': predictions_centered[i] - 0.02,
-                    'max90': predictions_centered[i] + 0.02,
+                    'estimate': predictions[i],
+                    'min90': lower_ci[i],
+                    'max90': upper_ci[i],
                     'interact': interact
                 })
-        
+
         # Save temporal heterogeneity results
         temporal_data = pd.DataFrame(results_list)
         temporal_data.to_csv(OUTPUT_FILES['effect_heterogeneity_time'], index=False)
-        
+
         logger.info("Temporal heterogeneity analysis completed")
         return temporal_data
     
